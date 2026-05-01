@@ -1,0 +1,14 @@
+services:
+  agent:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      # Persist credentials.json across container restarts so the agent
+      # doesn't re-register (and lose its $100k account) on each restart.
+      - ./credentials.json:/agent/credentials.json
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

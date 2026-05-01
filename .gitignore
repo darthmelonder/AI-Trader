@@ -95,6 +95,7 @@ addresses.json
 # ====================
 .secrets/
 .env.secrets
+credentials.json
 server/.env
 *.pem
 *.key

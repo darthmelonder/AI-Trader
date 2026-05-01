@@ -1,0 +1,315 @@
+import logging
+import math
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, time as dtime, timezone
+from zoneinfo import ZoneInfo
+
+from client import AI4TradeClient
+from notifier import Notifier
+from strategies.base import Strategy
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class _ScanStats:
+    symbols_checked: int = 0
+    symbols_with_analysis: int = 0
+    exits_triggered: int = 0
+    entries_opened: int = 0
+    api_errors: list = field(default_factory=list)
+
+    def log_summary(self, elapsed: float) -> None:
+        log.info(
+            "Scan summary: %ds elapsed | %d symbols checked | %d with analysis | "
+            "%d entries opened | %d exits triggered",
+            int(elapsed), self.symbols_checked, self.symbols_with_analysis,
+            self.entries_opened, self.exits_triggered,
+        )
+        if self.api_errors:
+            log.warning("API errors during scan: %s", ", ".join(self.api_errors))
+
+ET = ZoneInfo("America/New_York")
+_MARKET_OPEN = dtime(9, 30)
+_MARKET_CLOSE = dtime(16, 0)
+
+NASDAQ_TOP_50 = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA",
+    "AVGO", "COST", "NFLX", "ASML", "AMD", "QCOM", "INTC", "INTU",
+    "AMAT", "LRCX", "MU", "ADI", "KLAC", "MRVL", "SNPS", "CDNS",
+    "PANW", "CRWD", "FTNT", "ZS", "OKTA", "DDOG", "SNOW", "NET",
+    "TEAM", "WDAY", "NOW", "CRM", "ADBE", "ORCL", "CSCO", "TXN",
+    "HON", "ISRG", "REGN", "VRTX", "GILD", "AMGN", "BIIB", "MRNA",
+    "BKNG", "ABNB",
+]
+
+
+def is_market_open() -> bool:
+    now_et = datetime.now(ET)
+    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    t = now_et.time()
+    return _MARKET_OPEN <= t < _MARKET_CLOSE
+
+
+class Scanner:
+    def __init__(
+        self,
+        client: AI4TradeClient,
+        strategies: list,
+        notifier: Notifier,
+        config: dict,
+    ):
+        self.client = client
+        self.strategies = strategies
+        self.notifier = notifier
+        self.config = config
+
+    def run_scan(self) -> None:
+        t0 = time.time()
+        stats = _ScanStats()
+        log.info("── scan start ─────────────────────────────────")
+        market_open = is_market_open()
+        log.info("Market open: %s", market_open)
+
+        # Fetch shared data once for the whole scan
+        macro = self._safe_fetch("macro_signals", self.client.macro_signals, stats)
+        news_resp = self._safe_fetch("news", self.client.news, stats, "equities", 5)
+        news_items = (news_resp.get("categories") or [{}])[0].get("items") or [] if news_resp else []
+
+        if not macro:
+            log.warning("Could not fetch macro signals — skipping scan")
+            return
+
+        macro_count = f"{macro.get('bullish_count','?')}/{macro.get('total_count','?')}"
+        log.info("Macro: verdict=%s (%s signals bullish)", macro.get("verdict"), macro_count)
+        log.info("News: %d equities items loaded", len(news_items))
+
+        # Current open positions (self-owned only)
+        positions_resp = self._safe_fetch("positions", self.client.positions, stats) or {}
+        open_positions = [
+            p for p in (positions_resp.get("positions") or [])
+            if (p.get("source") or "self") == "self" and p.get("side") == "long"
+        ]
+        held_symbols = {p["symbol"] for p in open_positions}
+        # Fall back to starting balance when positions endpoint is unavailable (e.g. dry-run, no token yet)
+        cash = float(positions_resp.get("cash") or 100_000.0)
+
+        log.info("Open positions: %d  |  Cash: $%.2f", len(open_positions), cash)
+        for pos in open_positions:
+            log.info(
+                "  Holding %s: qty=%.2f entry=$%.2f pnl=$%.2f",
+                pos.get("symbol"), float(pos.get("quantity") or 0),
+                float(pos.get("entry_price") or 0), float(pos.get("pnl") or 0),
+            )
+
+        # ── Phase 1: Exit checks ──────────────────────────────────────────
+        for pos in open_positions:
+            self._check_exit(pos, macro, market_open, stats)
+
+        # Refresh after exits
+        positions_resp = self._safe_fetch("positions", self.client.positions, stats) or {}
+        open_positions = [
+            p for p in (positions_resp.get("positions") or [])
+            if (p.get("source") or "self") == "self" and p.get("side") == "long"
+        ]
+        held_symbols = {p["symbol"] for p in open_positions}
+        cash = float(positions_resp.get("cash") or 100_000.0)
+        max_positions = int(self.config.get("max_positions", 6))
+
+        # ── Phase 2: Entry scan ───────────────────────────────────────────
+        if len(open_positions) >= max_positions:
+            log.info("At max positions (%d/%d) — skipping entry scan", len(open_positions), max_positions)
+        elif not market_open:
+            log.info("Market closed — skipping entry scan")
+        else:
+            self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions), stats)
+
+        stats.log_summary(time.time() - t0)
+        log.info("── scan end ───────────────────────────────────")
+
+    # ── exit logic ────────────────────────────────────────────────────────
+
+    def _check_exit(self, position: dict, macro: dict, market_open: bool) -> None:
+        symbol = position["symbol"]
+        price_resp = self._safe_fetch(f"price:{symbol}", self.client.price, symbol)
+        if not price_resp:
+            return
+        current_price = float(price_resp.get("price") or 0)
+        if current_price <= 0:
+            log.warning("%s: could not get valid price (%s)", symbol, price_resp)
+            return
+
+        stock = self._safe_fetch(f"stock:{symbol}", self.client.stock_latest, symbol) or {}
+
+        for strategy in self.strategies:
+            exit_sig = strategy.evaluate_exit(
+                symbol=symbol,
+                position=position,
+                macro=macro,
+                stock=stock,
+                current_price=current_price,
+                config=self.config,
+            )
+            if exit_sig:
+                log.info("EXIT %s | reason=%s | %s", symbol, exit_sig.reason, exit_sig.thesis)
+                if market_open:
+                    self._execute_exit(position, current_price, exit_sig)
+                else:
+                    log.info("Market closed — exit flagged but will publish when market opens")
+                break
+
+    def _execute_exit(self, position: dict, current_price: float, exit_sig) -> None:
+        symbol = exit_sig.symbol
+        quantity = float(position.get("quantity") or 0)
+        entry_price = float(position.get("entry_price") or 0)
+
+        result = self.client.publish_realtime(
+            action="sell",
+            symbol=symbol,
+            quantity=quantity,
+            content=exit_sig.thesis,
+        )
+        if not result.get("dry_run") and not result.get("success", True):
+            log.warning("sell signal rejected: %s", result)
+            return
+
+        self.client.publish_strategy(
+            title=f"{symbol} — exit ({exit_sig.reason.replace('_', ' ')})",
+            content=exit_sig.thesis,
+            symbols=[symbol],
+        )
+        self.notifier.send_exit_alert(
+            symbol=symbol,
+            quantity=quantity,
+            price=current_price,
+            entry_price=entry_price,
+            reason=exit_sig.reason,
+            thesis=exit_sig.thesis,
+        )
+
+    # ── entry logic ───────────────────────────────────────────────────────
+
+    def _scan_entries(
+        self,
+        macro: dict,
+        news_items: list,
+        held_symbols: set,
+        cash: float,
+        max_positions: int,
+        current_count: int,
+    ) -> None:
+        # Featured stocks first (platform's hot picks, have freshest analysis)
+        featured_resp = self._safe_fetch("featured", self.client.featured_stocks, 12) or {}
+        featured_symbols = [
+            item["symbol"]
+            for item in (featured_resp.get("items") or [])
+            if item.get("symbol")
+        ]
+        # Remaining universe in order, deduped
+        rest = [s for s in NASDAQ_TOP_50 if s not in featured_symbols]
+        ordered = featured_symbols + rest
+
+        slots_available = max_positions - current_count
+        filled = 0
+
+        for symbol in ordered:
+            if filled >= slots_available:
+                break
+            if symbol in held_symbols:
+                continue
+
+            # Rate-limit: 1 req/sec on /price
+            time.sleep(1)
+
+            stock = self._safe_fetch(f"stock:{symbol}", self.client.stock_latest, symbol)
+            if not stock or not stock.get("available"):
+                continue
+
+            for strategy in self.strategies:
+                entry_sig = strategy.evaluate_entry(
+                    symbol=symbol,
+                    macro=macro,
+                    stock=stock,
+                    news_items=news_items,
+                    universe=NASDAQ_TOP_50,
+                )
+                if not entry_sig:
+                    continue
+
+                # Fetch price for quantity calc
+                price_resp = self._safe_fetch(f"price:{symbol}", self.client.price, symbol)
+                if not price_resp:
+                    continue
+                current_price = float(price_resp.get("price") or 0)
+                if current_price <= 0:
+                    continue
+
+                quantity = self._compute_quantity(current_price, cash)
+                if quantity < 1:
+                    log.info("%s: insufficient cash for entry (cash=$%.2f, price=$%.2f)", symbol, cash, current_price)
+                    continue
+
+                entry_sig.quantity = quantity
+                log.info("ENTRY %s | qty=%d @ ~$%.2f | %s", symbol, quantity, current_price, entry_sig.thesis)
+                self._execute_entry(entry_sig, current_price, strategy.name)
+
+                # Update cash estimate locally (avoid extra API call)
+                cash -= current_price * quantity
+                held_symbols.add(symbol)
+                filled += 1
+                break  # only one strategy can enter per symbol per scan
+
+    def _execute_entry(self, entry_sig, current_price: float, strategy_name: str) -> None:
+        symbol = entry_sig.symbol
+        result = self.client.publish_realtime(
+            action="buy",
+            symbol=symbol,
+            quantity=entry_sig.quantity,
+            content=entry_sig.thesis,
+        )
+        if not result.get("dry_run") and not result.get("success", True):
+            log.warning("buy signal rejected: %s", result)
+            return
+
+        self.client.publish_strategy(
+            title=f"{symbol} — Momentum+Macro entry signal",
+            content=self._build_strategy_post(entry_sig, current_price),
+            symbols=[symbol],
+        )
+        self.notifier.send_entry_alert(
+            symbol=symbol,
+            action="buy",
+            quantity=entry_sig.quantity,
+            price=current_price,
+            thesis=entry_sig.thesis,
+            strategy_name=strategy_name,
+        )
+
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    def _compute_quantity(self, price: float, cash: float) -> float:
+        position_size_pct = float(self.config.get("position_size_pct", 20.0))
+        allocation = cash * (position_size_pct / 100.0)
+        return max(0, math.floor(allocation / price))
+
+    def _build_strategy_post(self, entry_sig, price: float) -> str:
+        factors = "\n".join(f"• {f}" for f in entry_sig.confidence_factors[:5]) or "• n/a"
+        return (
+            f"Strategy: Momentum + Macro Alignment\n"
+            f"Symbol: {entry_sig.symbol}\n"
+            f"Virtual entry: {entry_sig.quantity:.0f} shares @ ~${price:.2f}\n\n"
+            f"Signal rationale:\n{entry_sig.thesis}\n\n"
+            f"Bullish factors:\n{factors}\n\n"
+            f"Exit plan: sell if signal flips to 'sell', macro turns defensive, "
+            f"price drops >8% from entry, or position age exceeds 90 days.\n\n"
+            f"This is a simulated trade for strategy validation only."
+        )
+
+    def _safe_fetch(self, label: str, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            log.warning("fetch '%s' failed: %s", label, exc)
+            return None
