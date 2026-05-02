@@ -74,8 +74,8 @@ class Scanner:
         log.info("Market open: %s", market_open)
 
         # Fetch shared data once for the whole scan
-        macro = self._safe_fetch("macro_signals", self.client.macro_signals, stats)
-        news_resp = self._safe_fetch("news", self.client.news, stats, "equities", 5)
+        macro = self._safe_fetch("macro_signals", self.client.macro_signals)
+        news_resp = self._safe_fetch("news", self.client.news, "equities", 5)
         news_items = (news_resp.get("categories") or [{}])[0].get("items") or [] if news_resp else []
 
         if not macro:
@@ -87,7 +87,7 @@ class Scanner:
         log.info("News: %d equities items loaded", len(news_items))
 
         # Current open positions (self-owned only)
-        positions_resp = self._safe_fetch("positions", self.client.positions, stats) or {}
+        positions_resp = self._safe_fetch("positions", self.client.positions) or {}
         open_positions = [
             p for p in (positions_resp.get("positions") or [])
             if (p.get("source") or "self") == "self" and p.get("side") == "long"
@@ -106,10 +106,10 @@ class Scanner:
 
         # ── Phase 1: Exit checks ──────────────────────────────────────────
         for pos in open_positions:
-            self._check_exit(pos, macro, market_open, stats)
+            self._check_exit(pos, macro, market_open)
 
         # Refresh after exits
-        positions_resp = self._safe_fetch("positions", self.client.positions, stats) or {}
+        positions_resp = self._safe_fetch("positions", self.client.positions) or {}
         open_positions = [
             p for p in (positions_resp.get("positions") or [])
             if (p.get("source") or "self") == "self" and p.get("side") == "long"
@@ -124,7 +124,7 @@ class Scanner:
         elif not market_open:
             log.info("Market closed — skipping entry scan")
         else:
-            self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions), stats)
+            self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions))
 
         stats.log_summary(time.time() - t0)
         log.info("── scan end ───────────────────────────────────")
