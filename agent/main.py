@@ -111,10 +111,7 @@ def _bootstrap_client(config: dict):
                 log.info("Authenticated as '%s' (id=%d)", me.get("name"), me.get("id"))
             except Exception:
                 log.info("Token invalid — re-logging in")
-                resp = client.login(config["agent_email"], config["agent_password"])
-                _save_credentials(resp["agent_id"], resp["token"])
-                client.set_token(resp["token"])
-                config["agent_id"] = resp["agent_id"]
+                _reauth(client, config)
     else:
         if config["dry_run"]:
             log.info("DRY RUN — no credentials found, skipping registration")
@@ -134,6 +131,15 @@ def _bootstrap_client(config: dict):
             )
 
     return client
+
+
+def _reauth(client, config: dict) -> None:
+    """Login to refresh a stale/rotated token. Updates client session and credentials in-place."""
+    resp = client.login(config["agent_name"], config["agent_password"])
+    _save_credentials(resp["agent_id"], resp["token"])
+    client.set_token(resp["token"])
+    config["agent_id"] = resp["agent_id"]
+    log.info("Re-authenticated (agent_id=%d)", resp["agent_id"])
 
 
 def _save_credentials(agent_id: int, token: str) -> None:
@@ -223,7 +229,14 @@ def main() -> None:
                     hb = client.heartbeat(config["agent_id"])
                     _process_heartbeat(hb)
             except Exception as exc:
-                log.warning("Heartbeat error: %s", exc)
+                if "401" in str(exc):
+                    log.warning("Heartbeat 401 — token stale, re-authenticating")
+                    try:
+                        _reauth(client, config)
+                    except Exception as auth_exc:
+                        log.error("Re-auth failed: %s", auth_exc)
+                else:
+                    log.warning("Heartbeat error: %s", exc)
             last_heartbeat = now
 
         if now - last_scan >= config["scan_interval_seconds"]:

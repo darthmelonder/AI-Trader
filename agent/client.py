@@ -74,8 +74,8 @@ class AI4TradeClient:
             "name": name, "email": email, "password": password,
         })
 
-    def login(self, email: str, password: str) -> dict:
-        return self._post("/claw/agents/login", {"email": email, "password": password})
+    def login(self, name: str, password: str) -> dict:
+        return self._post("/claw/agents/login", {"name": name, "password": password})
 
     def me(self) -> dict:
         return self._get("/claw/agents/me")
