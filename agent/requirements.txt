@@ -1,2 +1,7 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
+# Strategy 2 (llm_swing) dependencies
+google-genai>=1.0.0
+yfinance>=0.2.40
+fredapi>=0.5.2
+pandas>=2.0.0

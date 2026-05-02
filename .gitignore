@@ -96,6 +96,9 @@ addresses.json
 .secrets/
 .env.secrets
 credentials.json
+credentials.*.json
+agent/.env.swing
+agent/.env.*
 server/.env
 *.pem
 *.key

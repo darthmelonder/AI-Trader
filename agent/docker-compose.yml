@@ -1,12 +1,37 @@
 services:
+
+  # ── Strategy 1: Momentum + Macro Alignment ─────────────────────────────────
+  # Starts by default with: docker compose up -d
   agent:
     build: .
     env_file: .env
     restart: unless-stopped
     volumes:
-      # Persist credentials.json across container restarts so the agent
-      # doesn't re-register (and lose its $100k account) on each restart.
+      # Persist agent identity across container restarts.
+      # Copy your existing credentials.json here before running setup.sh
+      # if you want to keep your current leaderboard account.
       - ./credentials.json:/agent/credentials.json
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Strategy 2: LLM-Guided Swing ───────────────────────────────────────────
+  # Separate agent with its own identity and virtual $100k account.
+  # Only starts when the "swing" profile is active:
+  #   docker compose --profile swing up -d
+  # Or to run both agents at once:
+  #   docker compose --profile swing up -d
+  agent-swing:
+    build: .
+    env_file: .env.swing
+    command: ["python", "main.py", "--env", ".env.swing"]
+    restart: unless-stopped
+    profiles:
+      - swing
+    volumes:
+      - ./credentials.swing.json:/agent/credentials.swing.json
     logging:
       driver: "json-file"
       options:

@@ -2,10 +2,17 @@
 AI-Trader personal agent — entry point.
 
 Usage:
-  python main.py               # live mode (reads DRY_RUN from .env)
-  python main.py --dry-run     # force dry-run regardless of .env
-  python main.py --scan-now    # run one scan immediately then exit
-  python main.py --verbose     # show per-symbol gate debug logs
+  python main.py                        # momentum_macro agent (reads .env)
+  python main.py --env .env.swing       # llm_swing agent (separate identity + credentials)
+  python main.py --dry-run              # force dry-run regardless of .env
+  python main.py --scan-now             # run one scan immediately then exit
+  python main.py --verbose              # show per-symbol gate debug logs
+
+Running two strategies as separate leaderboard agents:
+  Terminal 1:  python main.py                   # JatinMomentumBot
+  Terminal 2:  python main.py --env .env.swing  # JatinSwingBot
+Each agent registers independently, holds its own virtual cash, and appears
+separately on the platform leaderboard so P&L is fully attributable.
 """
 import argparse
 import json
@@ -19,7 +26,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Parsed early so --env takes effect before any os.environ reads.
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument("--env", default=".env")
+_pre_args, _ = _pre.parse_known_args()
+load_dotenv(_pre_args.env)
 
 LOG_FMT = "%(asctime)s  %(levelname)-7s  %(name)s  %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
@@ -48,9 +59,17 @@ def _setup_logging(level: str, log_file: str) -> None:
 
 log = logging.getLogger(__name__)
 
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
-
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+# Credentials file is derived from the env file so each agent instance
+# maintains its own auth token.
+#   .env          → credentials.json
+#   .env.swing    → credentials.swing.json
+_env_name = Path(_pre_args.env).name
+if _env_name == ".env":
+    _creds_name = "credentials.json"
+else:
+    _tag = _env_name.removeprefix(".env.")  # ".env.swing" → "swing"
+    _creds_name = f"credentials.{_tag}.json"
+CREDENTIALS_PATH = Path(__file__).parent / _creds_name
 
 
 def _load_config(force_dry_run: bool) -> dict:
@@ -75,6 +94,19 @@ def _load_config(force_dry_run: bool) -> dict:
         ],
         "log_level": os.environ.get("LOG_LEVEL", "INFO").upper(),
         "log_file": os.environ.get("LOG_FILE", ""),
+        # ── external data API keys ─────────────────────────────────────────
+        "alpha_vantage_api_key": os.environ.get("ALPHA_VANTAGE_API_KEY", ""),
+        "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
+        "fred_api_key": os.environ.get("FRED_API_KEY", ""),
+        # ── Strategy 2 (llm_swing) tuning ─────────────────────────────────
+        "s2_min_llm_confidence": float(os.environ.get("S2_MIN_LLM_CONFIDENCE", 0.70)),
+        "s2_max_positions": int(os.environ.get("S2_MAX_POSITIONS", 3)),
+        "s2_position_size_pct": float(os.environ.get("S2_POSITION_SIZE_PCT", 15.0)),
+        "s2_max_hold_days": int(os.environ.get("S2_MAX_HOLD_DAYS", 30)),
+        "s2_llm_cache_ttl_hours": float(os.environ.get("S2_LLM_CACHE_TTL_HOURS", 24.0)),
+        "s2_earnings_blackout_days": int(os.environ.get("S2_EARNINGS_BLACKOUT_DAYS", 5)),
+        "s2_stop_loss_pct": float(os.environ.get("S2_STOP_LOSS_PCT", 9.0)),
+        "s2_target_return_pct": float(os.environ.get("S2_TARGET_RETURN_PCT", 12.0)),
     }
 
 
@@ -169,8 +201,12 @@ def _build_scanner(client, config, notifier):
     for name in config["active_strategies"]:
         cls = STRATEGY_REGISTRY.get(name)
         if cls:
-            active.append(cls())
-            log.info("Strategy loaded: %s", name)
+            try:
+                instance = cls(config) if getattr(cls, "NEEDS_CONFIG", False) else cls()
+                active.append(instance)
+                log.info("Strategy loaded: %s", name)
+            except Exception as exc:
+                log.error("Failed to instantiate strategy '%s': %s", name, exc)
         else:
             log.warning("Unknown strategy '%s' — skipping", name)
 
@@ -183,12 +219,15 @@ def _build_scanner(client, config, notifier):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI-Trader personal agent")
+    parser.add_argument("--env", default=".env", help="Env file to load (default: .env)")
     parser.add_argument("--dry-run", action="store_true", help="Suppress all write API calls")
     parser.add_argument("--scan-now", action="store_true", help="Run one scan then exit")
+    parser.add_argument("--force-scan", action="store_true", help="Run entry scan even when market is closed (testing)")
     parser.add_argument("--verbose", action="store_true", help="Show per-symbol gate debug logs")
     args = parser.parse_args()
 
     config = _load_config(force_dry_run=args.dry_run)
+    config["force_scan"] = args.force_scan
 
     level = "DEBUG" if args.verbose else config["log_level"]
     _setup_logging(level, config["log_file"])

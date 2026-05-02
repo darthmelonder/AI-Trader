@@ -119,11 +119,14 @@ class Scanner:
         max_positions = int(self.config.get("max_positions", 6))
 
         # ── Phase 2: Entry scan ───────────────────────────────────────────
+        force_scan = self.config.get("force_scan", False)
         if len(open_positions) >= max_positions:
             log.info("At max positions (%d/%d) — skipping entry scan", len(open_positions), max_positions)
-        elif not market_open:
-            log.info("Market closed — skipping entry scan")
+        elif not market_open and not force_scan:
+            log.info("Market closed — skipping entry scan (use --force-scan to override)")
         else:
+            if force_scan and not market_open:
+                log.info("Market closed but --force-scan active — running entry scan for testing")
             self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions))
 
         stats.log_summary(time.time() - t0)
