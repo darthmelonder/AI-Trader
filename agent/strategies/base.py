@@ -45,3 +45,17 @@ class Strategy(ABC):
         config: dict,
     ) -> Optional[ExitSignal]:
         """Return ExitSignal if any exit condition triggers, None otherwise."""
+
+    def probe(
+        self,
+        symbol: str,
+        macro: dict,
+        stock: dict,
+        news_items: list,
+    ) -> Optional[dict]:
+        """Return full analysis dict for *symbol* bypassing all pre-gates.
+
+        LLM-backed strategies override this to expose raw model reasoning.
+        Rule-based strategies may return None (not applicable).
+        """
+        return None

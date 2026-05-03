@@ -18,11 +18,7 @@ services:
         max-file: "3"
 
   # ── Strategy 2: LLM-Guided Swing ───────────────────────────────────────────
-  # Separate agent with its own identity and virtual $100k account.
-  # Only starts when the "swing" profile is active:
-  #   docker compose --profile swing up -d
-  # Or to run both agents at once:
-  #   docker compose --profile swing up -d
+  # docker compose --profile swing up -d
   agent-swing:
     build: .
     env_file: .env.swing
@@ -32,6 +28,25 @@ services:
       - swing
     volumes:
       - ./credentials.swing.json:/agent/credentials.swing.json
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Strategy 3: LLM-Guided Mean Reversion ──────────────────────────────────
+  # Contrarian strategy — buys oversold quality stocks, targets 7-14 day bounce.
+  # docker compose --profile mean-reversion up -d
+  # Run all three: docker compose --profile swing --profile mean-reversion up -d
+  agent-mean-reversion:
+    build: .
+    env_file: .env.mean_reversion
+    command: ["python", "main.py", "--env", ".env.mean_reversion"]
+    restart: unless-stopped
+    profiles:
+      - mean-reversion
+    volumes:
+      - ./credentials.mean_reversion.json:/agent/credentials.mean_reversion.json
     logging:
       driver: "json-file"
       options:

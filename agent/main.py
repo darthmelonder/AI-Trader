@@ -107,6 +107,15 @@ def _load_config(force_dry_run: bool) -> dict:
         "s2_earnings_blackout_days": int(os.environ.get("S2_EARNINGS_BLACKOUT_DAYS", 5)),
         "s2_stop_loss_pct": float(os.environ.get("S2_STOP_LOSS_PCT", 9.0)),
         "s2_target_return_pct": float(os.environ.get("S2_TARGET_RETURN_PCT", 12.0)),
+        # ── Strategy 3 (mean_reversion) tuning ────────────────────────────
+        "s3_min_llm_confidence": float(os.environ.get("S3_MIN_LLM_CONFIDENCE", 0.65)),
+        "s3_max_positions": int(os.environ.get("S3_MAX_POSITIONS", 3)),
+        "s3_position_size_pct": float(os.environ.get("S3_POSITION_SIZE_PCT", 10.0)),
+        "s3_max_hold_days": int(os.environ.get("S3_MAX_HOLD_DAYS", 14)),
+        "s3_llm_cache_ttl_hours": float(os.environ.get("S3_LLM_CACHE_TTL_HOURS", 24.0)),
+        "s3_earnings_blackout_days": int(os.environ.get("S3_EARNINGS_BLACKOUT_DAYS", 3)),
+        "s3_stop_loss_pct": float(os.environ.get("S3_STOP_LOSS_PCT", 7.0)),
+        "s3_target_return_pct": float(os.environ.get("S3_TARGET_RETURN_PCT", 10.0)),
     }
 
 
@@ -217,16 +226,120 @@ def _build_scanner(client, config, notifier):
     return Scanner(client, active, notifier, config)
 
 
+def _run_inspect(symbol: str, client, scanner) -> None:
+    """Fetch live market data and run every strategy's probe() for *symbol*."""
+    import json
+
+    print(f"\n{'═'*60}")
+    print(f"  INSPECT: {symbol}")
+    print(f"{'═'*60}\n")
+
+    # Fetch shared market context (same as a normal scan)
+    macro = None
+    try:
+        macro = client.macro_signals()
+    except Exception as exc:
+        log.warning("Could not fetch macro signals: %s", exc)
+    if not macro:
+        print("ERROR: Could not fetch macro signals. Check credentials / network.")
+        return
+
+    stock = None
+    try:
+        stock = client.stock_latest(symbol)
+    except Exception as exc:
+        log.warning("Could not fetch stock data for %s: %s", symbol, exc)
+    if not stock or not stock.get("available"):
+        print(f"ERROR: No platform analysis available for {symbol}.")
+        print("Tip: the platform may not have analysis for this symbol yet.")
+        return
+
+    news_resp = {}
+    try:
+        news_resp = client.news("equities", 5)
+    except Exception:
+        pass
+    news_items = (news_resp.get("categories") or [{}])[0].get("items") or []
+
+    # Print market snapshot
+    analysis = stock.get("analysis") or {}
+    print(f"Platform snapshot for {symbol}:")
+    print(f"  Signal:      {stock.get('signal')} / {stock.get('trend_status')}")
+    print(f"  Price:       ${stock.get('current_price', 'n/a')}")
+    print(f"  Return 5d:   {analysis.get('return_5d_pct', 'n/a')}%")
+    print(f"  Return 20d:  {analysis.get('return_20d_pct', 'n/a')}%")
+    print(f"  Macro:       {macro.get('verdict')} ({macro.get('bullish_count')}/{macro.get('total_count')} bullish)")
+    print()
+
+    # Run probe() on every strategy that supports it
+    any_probed = False
+    for strategy in scanner.strategies:
+        result = None
+        try:
+            result = strategy.probe(symbol, macro, stock, news_items)
+        except Exception as exc:
+            print(f"[{strategy.name}] probe() failed: {exc}\n")
+            continue
+
+        if result is None:
+            print(f"[{strategy.name}] No LLM analysis (rule-based strategy — N/A)\n")
+            continue
+
+        any_probed = True
+        decision = result.get("decision", {})
+        ctx = result.get("context", {})
+
+        print(f"{'─'*60}")
+        print(f"  Strategy: {strategy.name}")
+        print(f"{'─'*60}")
+        print(f"  Decision:    {decision.get('decision', '?').upper()}")
+        print(f"  Confidence:  {decision.get('confidence', '?')}")
+        print(f"  Horizon:     {decision.get('holding_horizon_days', '?')} days")
+        print(f"  Target:      +{decision.get('target_return_pct', '?')}%")
+        print(f"  Stop loss:   -{decision.get('stop_loss_pct', '?')}%")
+        print(f"\n  Thesis:")
+        print(f"    {decision.get('thesis', '')}")
+        risks = decision.get("key_risks") or []
+        if risks:
+            print(f"\n  Key risks:")
+            for r in risks:
+                print(f"    • {r}")
+
+        # Show the key data points Gemini saw
+        tech = ctx.get("technicals", {})
+        fund = ctx.get("fundamentals", {})
+        ins = ctx.get("insider_activity", {})
+        print(f"\n  Data used:")
+        print(f"    RSI-14:          {tech.get('rsi_14', 'n/a')}")
+        print(f"    Above 50d MA:    {tech.get('above_50d_ma', tech.get('above_50ma', 'n/a'))}")
+        print(f"    Above 200d MA:   {tech.get('above_200d_ma', tech.get('above_200ma', 'n/a'))}")
+        print(f"    P/E ratio:       {fund.get('pe_ratio', 'n/a')}")
+        print(f"    Analyst:         {fund.get('analyst_recommendation', 'n/a')}")
+        print(f"    Days to earn.:   {fund.get('days_to_earnings', 'n/a')}")
+        if ins:
+            print(f"    Insider buys:    {ins.get('buy_count', 0)} (C-suite: {ins.get('csuite_bought', False)})")
+        macro_ctx = ctx.get("macro", {})
+        print(f"    Fed rate:        {macro_ctx.get('fed_funds_rate', 'n/a')}%")
+        print(f"    10Y Treasury:    {macro_ctx.get('treasury_10y', 'n/a')}%")
+        print(f"    CPI YoY:         {macro_ctx.get('cpi_yoy_pct', 'n/a')}%")
+        print()
+
+    if not any_probed:
+        print("No LLM-backed strategies loaded. Use --env .env.swing or --env .env.mean_reversion")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI-Trader personal agent")
     parser.add_argument("--env", default=".env", help="Env file to load (default: .env)")
     parser.add_argument("--dry-run", action="store_true", help="Suppress all write API calls")
     parser.add_argument("--scan-now", action="store_true", help="Run one scan then exit")
     parser.add_argument("--force-scan", action="store_true", help="Run entry scan even when market is closed (testing)")
+    parser.add_argument("--inspect", metavar="SYMBOL", help="Show full LLM analysis for SYMBOL bypassing all pre-gates")
     parser.add_argument("--verbose", action="store_true", help="Show per-symbol gate debug logs")
     args = parser.parse_args()
 
-    config = _load_config(force_dry_run=args.dry_run)
+    # --inspect always implies dry-run (read-only)
+    config = _load_config(force_dry_run=args.dry_run or bool(args.inspect))
     config["force_scan"] = args.force_scan
 
     level = "DEBUG" if args.verbose else config["log_level"]
@@ -245,6 +358,10 @@ def main() -> None:
     )
 
     scanner = _build_scanner(client, config, notifier)
+
+    if args.inspect:
+        _run_inspect(args.inspect.upper(), client, scanner)
+        return
 
     if args.scan_now:
         scanner.run_scan()

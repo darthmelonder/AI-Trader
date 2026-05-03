@@ -1,4 +1,4 @@
-"""Gemini-powered market analyst for the LLM Swing strategy.
+"""Gemini-powered market analyst. Shared by all LLM-guided strategies.
 
 Model: gemini-3.1-flash-lite (free tier).
 
@@ -7,6 +7,9 @@ Rate strategy:
     ceiling (large JSON contexts spike TPM quickly).
   - On 429, retry up to 3 times honouring the server-suggested retry delay.
   - 24h per-symbol cache keeps daily call count well under 500.
+
+Each strategy passes its own system_prompt at construction so Swing and
+Mean-Reversion get different analytical framing from the same model.
 
 Single public class: LLMAnalyst.analyze(symbol, context) -> decision dict.
 """
@@ -25,10 +28,8 @@ _MAX_OUTPUT_TOKENS = 512
 _MIN_CALL_INTERVAL = 10.0  # >= 10s between calls -> ~6 RPM
 _MAX_RETRIES = 3
 
-_SYSTEM = """\
-You are a disciplined swing-trading analyst. Evaluate whether a stock is worth entering as a swing trade targeting a 1-4 week hold (up to 30 days).
-
-You will receive structured market data. Respond ONLY with valid JSON - no commentary, no markdown fences:
+_JSON_SCHEMA = """\
+Respond ONLY with valid JSON - no commentary, no markdown fences:
 
 {
   "decision": "buy | skip | sell",
@@ -39,7 +40,13 @@ You will receive structured market data. Respond ONLY with valid JSON - no comme
   "target_return_pct": <float>,
   "stop_loss_pct": <float>
 }
+"""
 
+# Default prompt — used by LLM Swing (momentum continuation)
+DEFAULT_SYSTEM = """\
+You are a disciplined swing-trading analyst. Evaluate whether a stock is worth entering as a swing trade targeting a 1-4 week hold (up to 30 days).
+
+""" + _JSON_SCHEMA + """
 Guidelines:
 - Output "buy" only if confidence >= 0.70 and the risk/reward is clearly favourable.
 - Output "sell" if the stock looks positioned to decline over the next 1-4 weeks.
@@ -50,10 +57,28 @@ Guidelines:
 - Never invent data not present in the input.
 """
 
+# Mean-reversion prompt — used by Mean Reversion strategy
+MEAN_REVERSION_SYSTEM = """\
+You are a contrarian analyst evaluating short-term oversold recovery potential. A stock has been beaten down by recent selling pressure. Assess whether it is likely to mean-revert toward its recent support/fair value within 7-14 days.
+
+""" + _JSON_SCHEMA + """
+Guidelines:
+- Focus on: structural health (above 200d MA), severity vs. cause of selloff, insider buying as a contrarian signal, absence of fundamental deterioration.
+- Output "buy" only if confidence >= 0.65 and the setup looks like temporary selling rather than fundamental breakdown.
+- Output "sell" if the selloff appears justified by deteriorating fundamentals.
+- Output "skip" when the cause of selling is unclear or data is thin.
+- Set target_return_pct to a realistic bounce target (typically 8-15%).
+- Set stop_loss_pct tightly (typically 6-9%) since mean-reversion failures are fast.
+- holding_horizon_days should be 7-14 for bounce trades.
+- Never invent data not present in the input.
+"""
+
 
 class LLMAnalyst:
-    def __init__(self, api_key: str, cache_ttl_hours: float = 24.0):
+    def __init__(self, api_key: str, cache_ttl_hours: float = 24.0,
+                 system_prompt: str = DEFAULT_SYSTEM):
         self._client = genai.Client(api_key=api_key)
+        self._system_prompt = system_prompt
         self._cache_ttl = cache_ttl_hours * 3600
         # {symbol: {"decision": dict, "cached_at": float}}
         self._cache: dict[str, dict] = {}
@@ -96,7 +121,7 @@ class LLMAnalyst:
                 response = self._client.models.generate_content(
                     model=_MODEL,
                     config=types.GenerateContentConfig(
-                        system_instruction=_SYSTEM,
+                        system_instruction=self._system_prompt,
                         max_output_tokens=_MAX_OUTPUT_TOKENS,
                         temperature=0.1,
                     ),
@@ -183,4 +208,6 @@ def _compact_context(ctx: dict) -> dict:
         "treasury_10y": macro.get("treasury_10y"),
         "cpi_yoy": macro.get("cpi_yoy_pct"),
         "news": ctx.get("news_sentiment"),
+        "insider_buys_30d": (ctx.get("insider_activity") or {}).get("buy_count"),
+        "insider_csuite_bought": (ctx.get("insider_activity") or {}).get("csuite_bought"),
     }

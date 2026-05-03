@@ -86,31 +86,74 @@ if [[ "$setup_swing" =~ ^[yY] ]]; then
   fi
 fi
 
+# ── Strategy 3 setup (.env.mean_reversion / credentials.mean_reversion.json) ──
+echo ""
+echo "═══ Strategy 3: LLM-Guided Mean Reversion (optional) ═════════════════════"
+read -rp "Set up the Mean Reversion agent as a separate leaderboard entry? [y/N] " setup_mr
+RUN_MR=false
+
+if [[ "$setup_mr" =~ ^[yY] ]]; then
+  RUN_MR=true
+
+  if [ ! -f .env.mean_reversion ]; then
+    if [ -f .env.mean_reversion.example ]; then
+      cp .env.mean_reversion.example .env.mean_reversion
+      echo "Created .env.mean_reversion from template."
+    else
+      echo "ERROR: .env.mean_reversion.example not found."
+      exit 1
+    fi
+    _edit_prompt ".env.mean_reversion" \
+      "AGENT_NAME      — different from S1 and S2 (e.g. JatinMeanRevBot)" \
+      "AGENT_EMAIL     — can use +tag trick: you+meanrev@gmail.com" \
+      "AGENT_PASSWORD  — choose a strong password" \
+      "GEMINI_API_KEY  — same key as .env.swing is fine" \
+      "FRED_API_KEY    — same key as .env.swing is fine" \
+      "DRY_RUN=false   — flip when ready to go live"
+  else
+    echo ".env.mean_reversion already exists — skipping."
+  fi
+
+  if [ ! -f credentials.mean_reversion.json ]; then
+    echo '{"token":null,"agent_id":null}' > credentials.mean_reversion.json
+    echo "Created empty credentials.mean_reversion.json."
+  fi
+fi
+
 # ── Build and start ───────────────────────────────────────────────────────────
 echo ""
 echo "Building image and starting agent(s)..."
 
-if [ "$RUN_SWING" = true ]; then
-  docker compose --profile swing up -d --build
-else
-  docker compose up -d --build
-fi
+PROFILES=""
+[ "$RUN_SWING" = true ] && PROFILES="$PROFILES --profile swing"
+[ "$RUN_MR"    = true ] && PROFILES="$PROFILES --profile mean-reversion"
+
+# shellcheck disable=SC2086
+docker compose $PROFILES up -d --build
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Agent(s) running. Useful commands:                         ║"
 echo "║                                                              ║"
-echo "║  docker compose logs -f                 # all live logs     ║"
-echo "║  docker compose logs -f agent           # Strategy 1 only  ║"
+echo "║  docker compose logs -f                       # all logs    ║"
+echo "║  docker compose logs -f agent                 # S1 only    ║"
 if [ "$RUN_SWING" = true ]; then
-echo "║  docker compose logs -f agent-swing     # Strategy 2 only  ║"
-echo "║                                                              ║"
-echo "║  docker compose restart agent           # restart S1       ║"
-echo "║  docker compose restart agent-swing     # restart S2       ║"
-echo "║  docker compose --profile swing down    # stop both        ║"
-else
-echo "║                                                              ║"
-echo "║  docker compose restart agent           # restart          ║"
-echo "║  docker compose down                    # stop             ║"
+echo "║  docker compose logs -f agent-swing           # S2 only    ║"
 fi
+if [ "$RUN_MR" = true ]; then
+echo "║  docker compose logs -f agent-mean-reversion  # S3 only    ║"
+fi
+echo "║                                                              ║"
+echo "║  docker compose restart agent                 # restart S1 ║"
+if [ "$RUN_SWING" = true ]; then
+echo "║  docker compose restart agent-swing           # restart S2 ║"
+fi
+if [ "$RUN_MR" = true ]; then
+echo "║  docker compose restart agent-mean-reversion  # restart S3 ║"
+fi
+echo "║                                                              ║"
+STOP_CMD="docker compose"
+[ "$RUN_SWING" = true ] && STOP_CMD="$STOP_CMD --profile swing"
+[ "$RUN_MR"    = true ] && STOP_CMD="$STOP_CMD --profile mean-reversion"
+echo "║  $STOP_CMD down"
 echo "╚══════════════════════════════════════════════════════════════╝"
