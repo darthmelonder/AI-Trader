@@ -167,6 +167,9 @@ class Scanner:
         symbol = exit_sig.symbol
         quantity = float(position.get("quantity") or 0)
         entry_price = float(position.get("entry_price") or 0)
+        pnl = (current_price - entry_price) * quantity
+
+        _log_exit(symbol, quantity, current_price, entry_price, pnl, exit_sig)
 
         result = self.client.publish_realtime(
             action="sell",
@@ -255,7 +258,7 @@ class Scanner:
                     continue
 
                 entry_sig.quantity = quantity
-                log.info("ENTRY %s | qty=%d @ ~$%.2f | %s", symbol, quantity, current_price, entry_sig.thesis)
+                _log_entry(symbol, strategy.name, quantity, current_price, entry_sig)
                 self._execute_entry(entry_sig, current_price, strategy.name)
 
                 # Update cash estimate locally (avoid extra API call)
@@ -277,8 +280,8 @@ class Scanner:
             return
 
         self.client.publish_strategy(
-            title=f"{symbol} — Momentum+Macro entry signal",
-            content=self._build_strategy_post(entry_sig, current_price),
+            title=f"{symbol} — {strategy_name} entry signal",
+            content=self._build_strategy_post(entry_sig, current_price, strategy_name),
             symbols=[symbol],
         )
         self.notifier.send_entry_alert(
@@ -288,6 +291,7 @@ class Scanner:
             price=current_price,
             thesis=entry_sig.thesis,
             strategy_name=strategy_name,
+            decision_data=entry_sig.decision_data,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────
@@ -297,16 +301,34 @@ class Scanner:
         allocation = cash * (position_size_pct / 100.0)
         return max(0, math.floor(allocation / price))
 
-    def _build_strategy_post(self, entry_sig, price: float) -> str:
+    def _build_strategy_post(self, entry_sig, price: float, strategy_name: str = "") -> str:
         factors = "\n".join(f"• {f}" for f in entry_sig.confidence_factors[:5]) or "• n/a"
+        d = entry_sig.decision_data
+        if d:
+            metrics = (
+                f"Confidence: {d.get('confidence', '?')}  |  "
+                f"Horizon: {d.get('holding_horizon_days', '?')} days  |  "
+                f"Target: +{d.get('target_return_pct', '?')}%  |  "
+                f"Stop: -{d.get('stop_loss_pct', '?')}%"
+            )
+            risks = "\n".join(f"• {r}" for r in (d.get("key_risks") or [])) or "• n/a"
+            thesis_text = d.get("thesis", entry_sig.thesis)
+            return (
+                f"Strategy: {strategy_name}\n"
+                f"Symbol: {entry_sig.symbol}\n"
+                f"Virtual entry: {entry_sig.quantity:.0f} shares @ ~${price:.2f}\n\n"
+                f"Thesis:\n{thesis_text}\n\n"
+                f"Decision metrics:\n{metrics}\n\n"
+                f"Key risks:\n{risks}\n\n"
+                f"Confidence factors:\n{factors}\n\n"
+                f"This is a simulated trade for strategy validation only."
+            )
         return (
-            f"Strategy: Momentum + Macro Alignment\n"
+            f"Strategy: {strategy_name}\n"
             f"Symbol: {entry_sig.symbol}\n"
             f"Virtual entry: {entry_sig.quantity:.0f} shares @ ~${price:.2f}\n\n"
             f"Signal rationale:\n{entry_sig.thesis}\n\n"
-            f"Bullish factors:\n{factors}\n\n"
-            f"Exit plan: sell if signal flips to 'sell', macro turns defensive, "
-            f"price drops >8% from entry, or position age exceeds 90 days.\n\n"
+            f"Confidence factors:\n{factors}\n\n"
             f"This is a simulated trade for strategy validation only."
         )
 
@@ -316,3 +338,37 @@ class Scanner:
         except Exception as exc:
             log.warning("fetch '%s' failed: %s", label, exc)
             return None
+
+
+# ── structured log helpers ────────────────────────────────────────────────────
+
+def _log_entry(symbol: str, strategy: str, quantity: float, price: float, entry_sig) -> None:
+    d = entry_sig.decision_data
+    log.info("ENTRY %s | strategy=%s | BUY %.0f shares @ ~$%.2f", symbol, strategy, quantity, price)
+    if d:
+        log.info(
+            "ENTRY %s | confidence=%.2f | horizon=%sd | target=+%.1f%% | stop=-%.1f%%",
+            symbol,
+            float(d.get("confidence", 0)),
+            d.get("holding_horizon_days", "?"),
+            float(d.get("target_return_pct", 0)),
+            float(d.get("stop_loss_pct", 0)),
+        )
+        log.info("ENTRY %s | thesis: %s", symbol, d.get("thesis", ""))
+        risks = d.get("key_risks") or []
+        if risks:
+            log.info("ENTRY %s | risks: %s", symbol, " | ".join(risks))
+    else:
+        log.info("ENTRY %s | thesis: %s", symbol, entry_sig.thesis)
+
+
+def _log_exit(
+    symbol: str, quantity: float, price: float,
+    entry_price: float, pnl: float, exit_sig,
+) -> None:
+    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    log.info(
+        "EXIT %s | reason=%s | SELL %.0f shares @ ~$%.2f | entry=$%.2f | est_pnl=%s",
+        symbol, exit_sig.reason, quantity, price, entry_price, pnl_str,
+    )
+    log.info("EXIT %s | thesis: %s", symbol, exit_sig.thesis)

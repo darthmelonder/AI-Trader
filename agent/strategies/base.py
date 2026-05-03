@@ -9,6 +9,9 @@ class EntrySignal:
     quantity: float
     thesis: str
     confidence_factors: list = field(default_factory=list)
+    # Structured LLM decision dict (llm_swing / mean_reversion populate this).
+    # Rule-based strategies leave it empty. Used by the notifier for rich formatting.
+    decision_data: dict = field(default_factory=dict)
 
 
 @dataclass

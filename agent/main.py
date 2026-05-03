@@ -85,6 +85,7 @@ def _load_config(force_dry_run: bool) -> dict:
         "position_size_pct": float(os.environ.get("POSITION_SIZE_PCT", 20.0)),
         "max_position_age_days": int(os.environ.get("MAX_POSITION_AGE_DAYS", 90)),
         "scan_interval_seconds": int(os.environ.get("SCAN_INTERVAL_SECONDS", 3600)),
+        "scan_offset_seconds": int(os.environ.get("SCAN_OFFSET_SECONDS", 0)),
         "heartbeat_interval_seconds": int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", 60)),
         "dry_run": force_dry_run or os.environ.get("DRY_RUN", "true").lower() == "true",
         "active_strategies": [
@@ -368,8 +369,14 @@ def main() -> None:
         return
 
     # ── main loop ─────────────────────────────────────────────────────────
-    log.info("Agent started. Heartbeat every %ds, scan every %ds.",
-             config["heartbeat_interval_seconds"], config["scan_interval_seconds"])
+    scan_offset = config["scan_offset_seconds"]
+    log.info(
+        "Agent started. Heartbeat every %ds, scan every %ds, offset %ds.",
+        config["heartbeat_interval_seconds"], config["scan_interval_seconds"], scan_offset,
+    )
+    if scan_offset > 0:
+        log.info("Waiting %ds before first scan (SCAN_OFFSET_SECONDS).", scan_offset)
+        time.sleep(scan_offset)
 
     last_heartbeat = 0.0
     last_scan = 0.0

@@ -154,7 +154,7 @@ class MeanReversionStrategy(Strategy):
             f"LLM-confidence={confidence:.2f}",
         ]
         return EntrySignal(symbol=symbol, quantity=0, thesis=thesis,
-                           confidence_factors=confidence_factors)
+                           confidence_factors=confidence_factors, decision_data=decision)
 
     # ── probe (gate-free inspection) ──────────────────────────────────────
 

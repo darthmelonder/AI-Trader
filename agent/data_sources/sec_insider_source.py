@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 _EDGAR_BASE = "https://data.sec.gov"
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _CACHE_TTL = 86400      # 24h per symbol
-_MIN_CALL_INTERVAL = 0.15
+_MIN_CALL_INTERVAL = 0.25  # 4 req/sec per container; two containers = 8 req/sec < EDGAR's 10 limit
 _MAX_FORM4_PER_SYMBOL = 3   # parse at most 3 recent Form 4 XMLs per symbol
 _LOOKBACK_DAYS = 30
 

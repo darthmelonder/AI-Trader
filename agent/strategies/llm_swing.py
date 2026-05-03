@@ -145,7 +145,8 @@ class LLMSwingStrategy(Strategy):
             f"analyst={fundamentals.get('analyst_recommendation') or 'n/a'}",
             f"LLM-confidence={confidence:.2f}",
         ]
-        return EntrySignal(symbol=symbol, quantity=0, thesis=thesis, confidence_factors=confidence_factors)
+        return EntrySignal(symbol=symbol, quantity=0, thesis=thesis,
+                           confidence_factors=confidence_factors, decision_data=decision)
 
     # ── probe (gate-free inspection) ──────────────────────────────────────
 

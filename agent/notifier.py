@@ -22,14 +22,11 @@ class Notifier:
         price: float,
         thesis: str,
         strategy_name: str,
+        decision_data: dict = None,
     ) -> None:
         title = f"TRADE SIGNAL — {action.upper()} {symbol}"
-        body = (
-            f"Action: {action.upper()} {quantity:.0f} shares @ ~${price:.2f}\n"
-            f"Strategy: {strategy_name}\n"
-            f"\n{thesis}\n"
-            f"\n→ Execute manually on your broker."
-        )
+        body = _format_entry_body(action, symbol, quantity, price, strategy_name,
+                                  thesis, decision_data or {})
         self._send(title, body, priority="high", tags=["chart_increasing", symbol])
 
     def send_exit_alert(
@@ -45,13 +42,7 @@ class Notifier:
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         priority = "urgent" if reason == "stop_loss" else "high"
         title = f"EXIT SIGNAL — SELL {symbol} ({reason.replace('_', ' ')})"
-        body = (
-            f"Action: SELL {quantity:.0f} shares @ ~${price:.2f}\n"
-            f"Entry: ${entry_price:.2f}  |  Est. P&L: {pnl_str}\n"
-            f"Reason: {reason.replace('_', ' ')}\n"
-            f"\n{thesis}\n"
-            f"\n→ Execute manually on your broker."
-        )
+        body = _format_exit_body(symbol, quantity, price, entry_price, pnl_str, reason, thesis)
         self._send(title, body, priority=priority, tags=["rotating_light", symbol])
 
     # ── internal ──────────────────────────────────────────────────────────
@@ -92,3 +83,67 @@ class Notifier:
             )
         except Exception as exc:
             log.warning("Discord send failed: %s", exc)
+
+
+# ── notification body formatters ──────────────────────────────────────────────
+
+def _format_entry_body(
+    action: str,
+    symbol: str,
+    quantity: float,
+    price: float,
+    strategy_name: str,
+    thesis: str,
+    decision_data: dict,
+) -> str:
+    lines = [
+        f"{action.upper()} {quantity:.0f} shares @ ~${price:.2f}",
+        f"Strategy: {strategy_name}",
+        "",
+    ]
+
+    if decision_data:
+        # LLM-backed strategy — show full structured reasoning
+        raw_thesis = decision_data.get("thesis", thesis)
+        lines += [
+            "Thesis:",
+            f"  {raw_thesis}",
+            "",
+            "Decision metrics:",
+            f"  Confidence: {decision_data.get('confidence', '?')}  |  "
+            f"Hold: {decision_data.get('holding_horizon_days', '?')} days",
+            f"  Target: +{decision_data.get('target_return_pct', '?')}%  |  "
+            f"Stop: -{decision_data.get('stop_loss_pct', '?')}%",
+        ]
+        risks = decision_data.get("key_risks") or []
+        if risks:
+            lines += ["", "Key risks:"]
+            lines += [f"  • {r}" for r in risks]
+    else:
+        # Rule-based strategy — show thesis as-is
+        lines += ["Rationale:", f"  {thesis}"]
+
+    lines += ["", "→ Execute manually on your broker."]
+    return "\n".join(lines)
+
+
+def _format_exit_body(
+    symbol: str,
+    quantity: float,
+    price: float,
+    entry_price: float,
+    pnl_str: str,
+    reason: str,
+    thesis: str,
+) -> str:
+    lines = [
+        f"SELL {quantity:.0f} shares @ ~${price:.2f}",
+        f"Entry: ${entry_price:.2f}  |  Est. P&L: {pnl_str}",
+        f"Reason: {reason.replace('_', ' ')}",
+        "",
+        "Thesis:",
+        f"  {thesis}",
+        "",
+        "→ Execute manually on your broker.",
+    ]
+    return "\n".join(lines)
