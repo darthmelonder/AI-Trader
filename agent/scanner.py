@@ -41,7 +41,7 @@ NASDAQ_TOP_50 = [
     "PANW", "CRWD", "FTNT", "ZS", "OKTA", "DDOG", "SNOW", "NET",
     "TEAM", "WDAY", "NOW", "CRM", "ADBE", "ORCL", "CSCO", "TXN",
     "HON", "ISRG", "REGN", "VRTX", "GILD", "AMGN", "BIIB", "MRNA",
-    "BKNG", "ABNB",
+    "BKNG", "ABNB", "SNDK", "LITE", "WDC", "CIEN",
 ]
 
 
