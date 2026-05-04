@@ -107,6 +107,10 @@ class AI4TradeClient:
 
     # ── signals ───────────────────────────────────────────────────────────
 
+    # Platform-enforced content length limits (400 if exceeded)
+    _REALTIME_CONTENT_MAX = 500
+    _STRATEGY_CONTENT_MAX = 2000
+
     def publish_realtime(
         self,
         action: str,
@@ -120,15 +124,15 @@ class AI4TradeClient:
             "symbol": symbol,
             "price": 0,
             "quantity": quantity,
-            "content": content,
+            "content": content[:self._REALTIME_CONTENT_MAX],
             "executed_at": "now",
         })
 
     def publish_strategy(self, title: str, content: str, symbols: list) -> dict:
         return self._post("/signals/strategy", {
             "market": "us-stock",
-            "title": title,
-            "content": content,
+            "title": title[:120],
+            "content": content[:self._STRATEGY_CONTENT_MAX],
             "symbols": ",".join(symbols),
             "tags": "momentum,macro-alignment,nasdaq",
         })

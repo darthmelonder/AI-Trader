@@ -109,6 +109,12 @@ class LLMSwingStrategy(Strategy):
         if days_to_earnings is not None and 0 <= days_to_earnings <= self._earnings_blackout:
             return _skip("earnings-blackout", f"earnings in {days_to_earnings}d")
 
+        # All pre-gates passed — log at INFO so production logs show the funnel
+        log.info("%s [llm_swing] pre-gates passed: RSI=%.1f MA50=%s analyst=%s — calling Gemini",
+                 symbol, rsi if rsi is not None else -1,
+                 "above" if ma_50d and current_price >= ma_50d else "below/n/a",
+                 fundamentals.get("analyst_recommendation") or "n/a")
+
         # Build LLM context and call analyst
         context = _build_context(
             symbol, macro, stock, news_items, fundamentals,

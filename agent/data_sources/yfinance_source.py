@@ -115,12 +115,31 @@ def _fetch(symbol: str, yf) -> dict:
     # Technical indicators from 90-day price history
     rsi_14 = None
     macd_data = None
+    bb_lower = None
+    bb_upper = None
+    bb_pct = None          # 0.0 = price at lower band, 1.0 = at upper band, <0 = below lower
+    at_lower_bb = False
+    drop_from_20d_high_pct = None
     try:
         hist = ticker.history(period="90d")
         if len(hist) >= 30:
             closes = hist["Close"]
             rsi_14 = _compute_rsi(closes, period=14)
             macd_data = _compute_macd(closes)
+        if len(hist) >= 20:
+            closes = hist["Close"]
+            price_now = float(closes.iloc[-1])
+            sma_20 = closes.rolling(20).mean()
+            std_20 = closes.rolling(20).std()
+            bb_upper_val = float(sma_20.iloc[-1] + 2 * std_20.iloc[-1])
+            bb_lower_val = float(sma_20.iloc[-1] - 2 * std_20.iloc[-1])
+            bb_range = bb_upper_val - bb_lower_val
+            bb_lower = round(bb_lower_val, 2)
+            bb_upper = round(bb_upper_val, 2)
+            bb_pct = round((price_now - bb_lower_val) / bb_range, 3) if bb_range > 0 else None
+            at_lower_bb = price_now <= bb_lower_val
+            high_20d = float(closes.rolling(20).max().iloc[-1])
+            drop_from_20d_high_pct = round((high_20d - price_now) / high_20d * 100, 2)
     except Exception as exc:
         log.debug("%s: technicals computation failed: %s", symbol, exc)
 
@@ -134,6 +153,11 @@ def _fetch(symbol: str, yf) -> dict:
         "days_to_earnings": days_to_earnings,
         "rsi_14": rsi_14,
         "macd": macd_data,
+        "bb_lower": bb_lower,
+        "bb_upper": bb_upper,
+        "bb_pct": bb_pct,
+        "at_lower_bb": at_lower_bb,
+        "drop_from_20d_high_pct": drop_from_20d_high_pct,
     }
 
 
@@ -154,17 +178,20 @@ def _compute_rsi(closes, period: int = 14) -> Optional[float]:
 
 
 def _compute_macd(closes, fast: int = 12, slow: int = 26, signal: int = 9) -> Optional[dict]:
-    """MACD (fast EMA - slow EMA), signal line, and histogram."""
+    """MACD (fast EMA - slow EMA), signal line, histogram, and previous histogram for slope."""
     try:
         ema_fast = closes.ewm(span=fast, adjust=False).mean()
         ema_slow = closes.ewm(span=slow, adjust=False).mean()
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
         histogram = macd_line - signal_line
+        hist_now = round(float(histogram.iloc[-1]), 4)
+        hist_prev = round(float(histogram.iloc[-2]), 4) if len(histogram) >= 2 else hist_now
         return {
             "macd": round(float(macd_line.iloc[-1]), 4),
             "signal": round(float(signal_line.iloc[-1]), 4),
-            "histogram": round(float(histogram.iloc[-1]), 4),
+            "histogram": hist_now,
+            "histogram_prev": hist_prev,   # yesterday's histogram — used to detect slope reversal
         }
     except Exception:
         return None

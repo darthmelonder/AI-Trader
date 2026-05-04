@@ -93,26 +93,57 @@ class MeanReversionStrategy(Strategy):
             return _skip("platform-signal",
                          f"signal={stock.get('signal')} trend={stock.get('trend_status')}")
 
-        # Fetch fundamentals + locally-computed RSI/MACD
+        # Fetch fundamentals + locally-computed RSI/MACD/BB
         fundamentals = self._yf.get_fundamentals(symbol)
         current_price = float(stock.get("current_price") or 0)
-
-        # RSI must be oversold (opposite of S2's overbought filter)
         rsi = fundamentals.get("rsi_14")
-        if rsi is None:
-            return _skip("rsi-unavailable", "no RSI data")
-        if rsi > _RSI_OVERSOLD:
-            return _skip("rsi-not-oversold", f"RSI={rsi:.1f}>{_RSI_OVERSOLD}")
+        at_lower_bb = fundamentals.get("at_lower_bb", False)
+        bb_pct = fundamentals.get("bb_pct")
 
-        # Must be above 200d MA — structurally healthy, just temporarily beaten down
+        # ── OVERSOLD TRIGGER: at least one of two signals must fire ──────────
+        # Trigger A: RSI <= 35 (momentum-based oversold)
+        trigger_rsi = rsi is not None and rsi <= _RSI_OVERSOLD
+        # Trigger B: price at or below lower Bollinger Band (statistical extreme)
+        trigger_bb = at_lower_bb
+
+        if not trigger_rsi and not trigger_bb:
+            rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=n/a"
+            bb_str = f"BB%={bb_pct:.2f}" if bb_pct is not None else "BB=n/a"
+            return _skip("not-oversold", f"{rsi_str} {bb_str} — neither RSI<={_RSI_OVERSOLD} nor at lower BB")
+
+        trigger_label = "+".join(filter(None, ["RSI" if trigger_rsi else "", "BB" if trigger_bb else ""]))
+        log.debug("  %s [mean_reversion] oversold trigger=%s RSI=%s BB%%=%s",
+                  symbol, trigger_label,
+                  f"{rsi:.1f}" if rsi else "n/a",
+                  f"{bb_pct:.2f}" if bb_pct is not None else "n/a")
+
+        # ── MACD CONFIRMATION: selling momentum must not still be accelerating ─
+        # Histogram moving from negative toward zero = sellers losing steam = OK to enter.
+        # Histogram still falling deeper negative = selling accelerating = wait.
+        macd_data = fundamentals.get("macd") or {}
+        hist_now = float(macd_data.get("histogram") or 0)
+        hist_prev = float(macd_data.get("histogram_prev") or hist_now)
+        if hist_now < 0 and hist_now < hist_prev:
+            return _skip("macd-selling-accelerating",
+                         f"histogram {hist_prev:.4f} → {hist_now:.4f} (still falling)")
+
+        # ── STRUCTURAL HEALTH: must be above 200d MA ─────────────────────────
         ma_200d = fundamentals.get("ma_200d")
         if ma_200d and current_price > 0 and current_price < ma_200d:
             return _skip("below-200d-ma", f"price={current_price:.2f}<MA200={ma_200d:.2f}")
 
-        # Tight earnings blackout — bounce trades can't hold through binary events
+        # ── EARNINGS BLACKOUT ─────────────────────────────────────────────────
         days_to_earnings = fundamentals.get("days_to_earnings")
         if days_to_earnings is not None and 0 <= days_to_earnings <= self._earnings_blackout:
             return _skip("earnings-blackout", f"earnings in {days_to_earnings}d")
+
+        # All pre-gates passed — log at INFO so production logs show the funnel
+        drop = fundamentals.get("drop_from_20d_high_pct")
+        log.info("%s [mean_reversion] pre-gates passed: trigger=%s RSI=%s BB%%=%s drop_20d=%.1f%% — calling Gemini",
+                 symbol, trigger_label,
+                 f"{rsi:.1f}" if rsi is not None else "n/a",
+                 f"{bb_pct:.2f}" if bb_pct is not None else "n/a",
+                 drop if drop is not None else 0)
 
         # Build context and call Gemini
         context = _build_context(
@@ -139,9 +170,12 @@ class MeanReversionStrategy(Strategy):
 
         insider = context.get("insider_activity", {})
         risks = "; ".join(decision.get("key_risks") or [])
+        rsi_str = f"{rsi:.1f}" if rsi is not None else "n/a"
+        bb_str = f"{bb_pct:.2f}" if bb_pct is not None else "n/a"
         thesis = (
             f"[mean_reversion] {symbol}: {decision['thesis']} "
-            f"| RSI={rsi:.1f} confidence={confidence:.2f} horizon={decision.get('holding_horizon_days', '?')}d "
+            f"| trigger={trigger_label} RSI={rsi_str} BB%={bb_str} "
+            f"| confidence={confidence:.2f} horizon={decision.get('holding_horizon_days', '?')}d "
             f"| target=+{decision.get('target_return_pct', '?')}% "
             f"| stop=-{decision.get('stop_loss_pct', '?')}% "
             f"| insider_buys={insider.get('buy_count', 0)} csuite={insider.get('csuite_bought', False)} "
@@ -150,6 +184,7 @@ class MeanReversionStrategy(Strategy):
         confidence_factors = [
             f"RSI={rsi:.1f} (oversold)",
             f"MA200={'above' if ma_200d and current_price >= ma_200d else 'n/a'}",
+            f"MACD hist={hist_now:.4f} (was {hist_prev:.4f})",
             f"insider_buys={insider.get('buy_count', 0)}",
             f"LLM-confidence={confidence:.2f}",
         ]
@@ -301,7 +336,15 @@ def _build_context(
         },
         "technicals": {
             "rsi_14": fundamentals.get("rsi_14"),
-            "macd": fundamentals.get("macd"),
+            "macd_histogram": (fundamentals.get("macd") or {}).get("histogram"),
+            "macd_histogram_prev": (fundamentals.get("macd") or {}).get("histogram_prev"),
+            "macd_histogram_rising": (
+                (fundamentals.get("macd") or {}).get("histogram", 0) >
+                (fundamentals.get("macd") or {}).get("histogram_prev", 0)
+            ),
+            "bb_pct": fundamentals.get("bb_pct"),       # 0=lower band, 1=upper, <0=below lower
+            "at_lower_bb": fundamentals.get("at_lower_bb", False),
+            "drop_from_20d_high_pct": fundamentals.get("drop_from_20d_high_pct"),
             "ma_50d": fundamentals.get("ma_50d"),
             "ma_200d": ma_200d,
             "above_200d_ma": bool(ma_200d and current_price >= float(ma_200d or 0)),

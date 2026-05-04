@@ -22,11 +22,17 @@ class _ScanStats:
 
     def log_summary(self, elapsed: float) -> None:
         log.info(
-            "Scan summary: %ds elapsed | %d symbols checked | %d with analysis | "
-            "%d entries opened | %d exits triggered",
+            "Scan summary: %ds elapsed | %d symbols iterated | %d had platform analysis "
+            "| %d entries opened | %d exits triggered",
             int(elapsed), self.symbols_checked, self.symbols_with_analysis,
             self.entries_opened, self.exits_triggered,
         )
+        if self.symbols_with_analysis > 0 and self.entries_opened == 0:
+            log.info(
+                "No entries: %d symbols had data but none passed all strategy gates "
+                "(normal in trending/non-oversold markets — use --verbose to see per-symbol decisions)",
+                self.symbols_with_analysis,
+            )
         if self.api_errors:
             log.warning("API errors during scan: %s", ", ".join(self.api_errors))
 
@@ -106,7 +112,7 @@ class Scanner:
 
         # ── Phase 1: Exit checks ──────────────────────────────────────────
         for pos in open_positions:
-            self._check_exit(pos, macro, market_open)
+            self._check_exit(pos, macro, market_open, stats)
 
         # Refresh after exits
         positions_resp = self._safe_fetch("positions", self.client.positions) or {}
@@ -127,14 +133,14 @@ class Scanner:
         else:
             if force_scan and not market_open:
                 log.info("Market closed but --force-scan active — running entry scan for testing")
-            self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions))
+            self._scan_entries(macro, news_items, held_symbols, cash, max_positions, len(open_positions), stats)
 
         stats.log_summary(time.time() - t0)
         log.info("── scan end ───────────────────────────────────")
 
     # ── exit logic ────────────────────────────────────────────────────────
 
-    def _check_exit(self, position: dict, macro: dict, market_open: bool) -> None:
+    def _check_exit(self, position: dict, macro: dict, market_open: bool, stats: "_ScanStats") -> None:
         symbol = position["symbol"]
         price_resp = self._safe_fetch(f"price:{symbol}", self.client.price, symbol)
         if not price_resp:
@@ -156,11 +162,15 @@ class Scanner:
                 config=self.config,
             )
             if exit_sig:
-                log.info("EXIT %s | reason=%s | %s", symbol, exit_sig.reason, exit_sig.thesis)
+                stats.exits_triggered += 1
                 if market_open:
-                    self._execute_exit(position, current_price, exit_sig)
+                    try:
+                        self._execute_exit(position, current_price, exit_sig)
+                    except Exception as exc:
+                        log.error("Failed to publish exit for %s: %s — scan continues", symbol, exc)
                 else:
-                    log.info("Market closed — exit flagged but will publish when market opens")
+                    log.info("EXIT flagged (market closed) %s | reason=%s — will publish when market opens",
+                             symbol, exit_sig.reason)
                 break
 
     def _execute_exit(self, position: dict, current_price: float, exit_sig) -> None:
@@ -170,22 +180,37 @@ class Scanner:
         pnl = (current_price - entry_price) * quantity
 
         _log_exit(symbol, quantity, current_price, entry_price, pnl, exit_sig)
+        platform_ok = False
 
-        result = self.client.publish_realtime(
-            action="sell",
-            symbol=symbol,
-            quantity=quantity,
-            content=exit_sig.thesis,
-        )
-        if not result.get("dry_run") and not result.get("success", True):
-            log.warning("sell signal rejected: %s", result)
-            return
+        # 1. Publish realtime sell to platform (best-effort)
+        try:
+            result = self.client.publish_realtime(
+                action="sell",
+                symbol=symbol,
+                quantity=quantity,
+                content=exit_sig.thesis,
+            )
+            if result.get("dry_run"):
+                platform_ok = True
+            elif not result.get("success", True):
+                log.warning("%s: sell signal rejected by platform: %s", symbol, result)
+            else:
+                platform_ok = True
+        except Exception as exc:
+            log.error("%s: failed to publish realtime sell to platform: %s", symbol, exc)
 
-        self.client.publish_strategy(
-            title=f"{symbol} — exit ({exit_sig.reason.replace('_', ' ')})",
-            content=exit_sig.thesis,
-            symbols=[symbol],
-        )
+        # 2. Publish strategy post (best-effort)
+        if platform_ok:
+            try:
+                self.client.publish_strategy(
+                    title=f"{symbol} — exit ({exit_sig.reason.replace('_', ' ')})",
+                    content=exit_sig.thesis,
+                    symbols=[symbol],
+                )
+            except Exception as exc:
+                log.warning("%s: failed to publish strategy exit post: %s", symbol, exc)
+
+        # 3. Always notify
         self.notifier.send_exit_alert(
             symbol=symbol,
             quantity=quantity,
@@ -194,6 +219,12 @@ class Scanner:
             reason=exit_sig.reason,
             thesis=exit_sig.thesis,
         )
+        if not platform_ok:
+            log.warning(
+                "%s: ntfy notification sent but platform exit post FAILED — "
+                "virtual position may still show as open on the leaderboard",
+                symbol,
+            )
 
     # ── entry logic ───────────────────────────────────────────────────────
 
@@ -205,6 +236,7 @@ class Scanner:
         cash: float,
         max_positions: int,
         current_count: int,
+        stats: "_ScanStats",
     ) -> None:
         # Featured stocks first (platform's hot picks, have freshest analysis)
         featured_resp = self._safe_fetch("featured", self.client.featured_stocks, 12) or {}
@@ -229,10 +261,13 @@ class Scanner:
             # Rate-limit: 1 req/sec on /price
             time.sleep(1)
 
+            stats.symbols_checked += 1
             stock = self._safe_fetch(f"stock:{symbol}", self.client.stock_latest, symbol)
             if not stock or not stock.get("available"):
+                log.debug("%s: no platform analysis available — skipping", symbol)
                 continue
 
+            stats.symbols_with_analysis += 1
             for strategy in self.strategies:
                 entry_sig = strategy.evaluate_entry(
                     symbol=symbol,
@@ -259,8 +294,13 @@ class Scanner:
 
                 entry_sig.quantity = quantity
                 _log_entry(symbol, strategy.name, quantity, current_price, entry_sig)
-                self._execute_entry(entry_sig, current_price, strategy.name)
+                try:
+                    self._execute_entry(entry_sig, current_price, strategy.name)
+                except Exception as exc:
+                    log.error("Unexpected error executing entry for %s: %s", symbol, exc, exc_info=True)
+                    continue
 
+                stats.entries_opened += 1
                 # Update cash estimate locally (avoid extra API call)
                 cash -= current_price * quantity
                 held_symbols.add(symbol)
@@ -269,21 +309,37 @@ class Scanner:
 
     def _execute_entry(self, entry_sig, current_price: float, strategy_name: str) -> None:
         symbol = entry_sig.symbol
-        result = self.client.publish_realtime(
-            action="buy",
-            symbol=symbol,
-            quantity=entry_sig.quantity,
-            content=entry_sig.thesis,
-        )
-        if not result.get("dry_run") and not result.get("success", True):
-            log.warning("buy signal rejected: %s", result)
-            return
+        platform_ok = False
 
-        self.client.publish_strategy(
-            title=f"{symbol} — {strategy_name} entry signal",
-            content=self._build_strategy_post(entry_sig, current_price, strategy_name),
-            symbols=[symbol],
-        )
+        # 1. Publish realtime trade to platform (best-effort)
+        try:
+            result = self.client.publish_realtime(
+                action="buy",
+                symbol=symbol,
+                quantity=entry_sig.quantity,
+                content=entry_sig.thesis,
+            )
+            if result.get("dry_run"):
+                platform_ok = True
+            elif not result.get("success", True):
+                log.warning("%s: buy signal rejected by platform: %s", symbol, result)
+            else:
+                platform_ok = True
+        except Exception as exc:
+            log.error("%s: failed to publish realtime signal to platform: %s", symbol, exc)
+
+        # 2. Publish strategy post (only worth doing if the trade was accepted)
+        if platform_ok:
+            try:
+                self.client.publish_strategy(
+                    title=f"{symbol} — {strategy_name} entry signal",
+                    content=self._build_strategy_post(entry_sig, current_price, strategy_name),
+                    symbols=[symbol],
+                )
+            except Exception as exc:
+                log.warning("%s: failed to publish strategy post: %s", symbol, exc)
+
+        # 3. Always notify — this is the user's primary alert channel for manual execution
         self.notifier.send_entry_alert(
             symbol=symbol,
             action="buy",
@@ -293,6 +349,12 @@ class Scanner:
             strategy_name=strategy_name,
             decision_data=entry_sig.decision_data,
         )
+        if not platform_ok:
+            log.warning(
+                "%s: ntfy notification sent but platform post FAILED — "
+                "virtual position is NOT tracked on the leaderboard",
+                symbol,
+            )
 
     # ── helpers ───────────────────────────────────────────────────────────
 
