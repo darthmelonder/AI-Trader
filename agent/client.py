@@ -116,13 +116,14 @@ class AI4TradeClient:
         action: str,
         symbol: str,
         quantity: float,
+        price: float = 0.0,
         content: str = "",
     ) -> dict:
         return self._post("/signals/realtime", {
             "market": "us-stock",
             "action": action,
             "symbol": symbol,
-            "price": 0,
+            "price": round(price, 2),
             "quantity": quantity,
             "content": content[:self._REALTIME_CONTENT_MAX],
             "executed_at": "now",

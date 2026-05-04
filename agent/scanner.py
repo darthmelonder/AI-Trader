@@ -188,6 +188,7 @@ class Scanner:
                 action="sell",
                 symbol=symbol,
                 quantity=quantity,
+                price=current_price,
                 content=exit_sig.thesis,
             )
             if result.get("dry_run"):
@@ -317,6 +318,7 @@ class Scanner:
                 action="buy",
                 symbol=symbol,
                 quantity=entry_sig.quantity,
+                price=current_price,
                 content=entry_sig.thesis,
             )
             if result.get("dry_run"):

@@ -24,7 +24,7 @@ class Notifier:
         strategy_name: str,
         decision_data: dict = None,
     ) -> None:
-        title = f"TRADE SIGNAL — {action.upper()} {symbol}"
+        title = f"TRADE SIGNAL - {action.upper()} {symbol}"
         body = _format_entry_body(action, symbol, quantity, price, strategy_name,
                                   thesis, decision_data or {})
         self._send(title, body, priority="high", tags=["chart_increasing", symbol])
@@ -41,7 +41,7 @@ class Notifier:
         pnl = (price - entry_price) * quantity
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         priority = "urgent" if reason == "stop_loss" else "high"
-        title = f"EXIT SIGNAL — SELL {symbol} ({reason.replace('_', ' ')})"
+        title = f"EXIT SIGNAL - SELL {symbol} ({reason.replace('_', ' ')})"
         body = _format_exit_body(symbol, quantity, price, entry_price, pnl_str, reason, thesis)
         self._send(title, body, priority=priority, tags=["rotating_light", symbol])
 
@@ -49,7 +49,7 @@ class Notifier:
 
     def _send(self, title: str, body: str, priority: str = "default", tags: list = None) -> None:
         if self.dry_run:
-            log.info("[DRY RUN] Notification — %s\n%s", title, body)
+            log.info("[DRY RUN] Notification - %s\n%s", title, body)
             return
         self._ntfy(title, body, priority, tags or [])
         if self.discord_webhook:
@@ -103,7 +103,7 @@ def _format_entry_body(
     ]
 
     if decision_data:
-        # LLM-backed strategy — show full structured reasoning
+        # LLM-backed strategy - show full structured reasoning
         raw_thesis = decision_data.get("thesis", thesis)
         lines += [
             "Thesis:",
@@ -120,7 +120,7 @@ def _format_entry_body(
             lines += ["", "Key risks:"]
             lines += [f"  • {r}" for r in risks]
     else:
-        # Rule-based strategy — show thesis as-is
+        # Rule-based strategy - show thesis as-is
         lines += ["Rationale:", f"  {thesis}"]
 
     lines += ["", "→ Execute manually on your broker."]
