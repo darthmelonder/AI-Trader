@@ -120,6 +120,8 @@ def _fetch(symbol: str, yf) -> dict:
     bb_pct = None          # 0.0 = price at lower band, 1.0 = at upper band, <0 = below lower
     at_lower_bb = False
     drop_from_20d_high_pct = None
+    return_5d_pct = None
+    return_20d_pct = None
     try:
         hist = ticker.history(period="90d")
         if len(hist) >= 30:
@@ -140,6 +142,13 @@ def _fetch(symbol: str, yf) -> dict:
             at_lower_bb = price_now <= bb_lower_val
             high_20d = float(closes.rolling(20).max().iloc[-1])
             drop_from_20d_high_pct = round((high_20d - price_now) / high_20d * 100, 2)
+        if len(hist) >= 6:
+            closes = hist["Close"]
+            p_now = float(closes.iloc[-1])
+            p_5d  = float(closes.iloc[-6])
+            p_20d = float(closes.iloc[-21]) if len(closes) >= 21 else float(closes.iloc[0])
+            return_5d_pct  = round((p_now - p_5d)  / p_5d  * 100, 2) if p_5d  > 0 else None
+            return_20d_pct = round((p_now - p_20d) / p_20d * 100, 2) if p_20d > 0 else None
     except Exception as exc:
         log.debug("%s: technicals computation failed: %s", symbol, exc)
 
@@ -158,6 +167,8 @@ def _fetch(symbol: str, yf) -> dict:
         "bb_pct": bb_pct,
         "at_lower_bb": at_lower_bb,
         "drop_from_20d_high_pct": drop_from_20d_high_pct,
+        "return_5d_pct": return_5d_pct,
+        "return_20d_pct": return_20d_pct,
     }
 
 

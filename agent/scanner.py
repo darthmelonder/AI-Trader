@@ -265,8 +265,14 @@ class Scanner:
             stats.symbols_checked += 1
             stock = self._safe_fetch(f"stock:{symbol}", self.client.stock_latest, symbol)
             if not stock or not stock.get("available"):
-                log.debug("%s: no platform analysis available — skipping", symbol)
-                continue
+                # Platform analysis unavailable — fall back to synthetic stock dict for
+                # LLM-backed strategies (they gate on yfinance RSI/BB/MACD, not platform signals).
+                # Rule-based strategies like momentum_macro need real platform signals, so skip.
+                if not any(getattr(s, "NEEDS_CONFIG", False) for s in self.strategies):
+                    log.debug("%s: no platform analysis — skipping (rule-based strategy)", symbol)
+                    continue
+                stock = _synthetic_stock(symbol)
+                log.debug("%s: no platform analysis — using yfinance-derived synthetic stock", symbol)
 
             stats.symbols_with_analysis += 1
             for strategy in self.strategies:
@@ -402,6 +408,37 @@ class Scanner:
         except Exception as exc:
             log.warning("fetch '%s' failed: %s", label, exc)
             return None
+
+
+# ── synthetic stock fallback ──────────────────────────────────────────────────
+
+def _synthetic_stock(symbol: str) -> dict:
+    """Minimal neutral stock dict for symbols with no platform analysis.
+
+    Used by LLM-backed strategies (llm_swing, mean_reversion) so they can still
+    run their yfinance-based gates and pass context to Gemini. The signal and
+    trend are set to neutral values that won't trigger the 'skip if sell/defensive'
+    pre-gates but correctly signal to the LLM that no platform opinion is available.
+
+    Rule-based strategies (momentum_macro) must NOT receive synthetic stock dicts —
+    their gates depend entirely on real platform signals.
+    """
+    return {
+        "available": True,
+        "synthetic": True,          # flag visible in logs and LLM context
+        "symbol": symbol,
+        "signal": "watch",          # neutral — won't trip the sell-signal gate
+        "trend_status": "mixed",    # neutral
+        "signal_score": 0,
+        "current_price": None,      # strategies use yfinance current_price_yf instead
+        "bullish_factors": [],
+        "risk_factors": [],
+        "summary": "",
+        "analysis": {
+            "return_5d_pct": None,  # populated from yfinance inside _build_context
+            "return_20d_pct": None,
+        },
+    }
 
 
 # ── structured log helpers ────────────────────────────────────────────────────

@@ -95,7 +95,7 @@ class MeanReversionStrategy(Strategy):
 
         # Fetch fundamentals + locally-computed RSI/MACD/BB
         fundamentals = self._yf.get_fundamentals(symbol)
-        current_price = float(stock.get("current_price") or 0)
+        current_price = float(stock.get("current_price") or fundamentals.get("current_price_yf") or 0)
         rsi = fundamentals.get("rsi_14")
         at_lower_bb = fundamentals.get("at_lower_bb", False)
         bb_pct = fundamentals.get("bb_pct")
@@ -321,18 +321,24 @@ def _build_context(
     fred_data = fred_source.get_macro_snapshot(fred_key) if fred_key else {}
     insider = insider_source.get_insider_activity(symbol) if insider_source else {}
 
+    # Use yfinance returns when platform analysis is unavailable (synthetic stock)
+    ret_5d  = analysis.get("return_5d_pct")  or fundamentals.get("return_5d_pct")
+    ret_20d = analysis.get("return_20d_pct") or fundamentals.get("return_20d_pct")
+    eff_price = current_price or fundamentals.get("current_price_yf")
+
     return {
         "symbol": symbol,
         "platform_analysis": {
             "signal": stock.get("signal"),
             "trend_status": stock.get("trend_status"),
             "signal_score": stock.get("signal_score"),
-            "return_5d_pct": analysis.get("return_5d_pct"),
-            "return_20d_pct": analysis.get("return_20d_pct"),
-            "current_price": current_price,
+            "return_5d_pct": ret_5d,
+            "return_20d_pct": ret_20d,
+            "current_price": eff_price,
             "bullish_factors": (stock.get("bullish_factors") or [])[:3],
             "risk_factors": (stock.get("risk_factors") or [])[:3],
             "summary": (stock.get("summary") or "")[:200],
+            "data_source": "yfinance_only" if stock.get("synthetic") else "platform",
         },
         "technicals": {
             "rsi_14": fundamentals.get("rsi_14"),
